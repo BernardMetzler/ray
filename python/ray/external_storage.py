@@ -377,12 +377,27 @@ class ExternalStorageSmartOpenImpl(ExternalStorage):
             # Setup boto3. It is essential because if we don't create boto
             # session, smart_open will create a new session for every
             # open call.
-            self.s3 = boto3.resource(service_name="s3")
+            # bmt: switch to session model self.s3 = boto3.resource(service_name="s3")
+            real_uri = self.uri.lstrip("s3:")
+            self.uri = real_uri
+            self.s3 = boto3.Session().client('s3', endpoint_url=real_uri)
+
+            # bmt: create bucket if not existing
+            import botocore.exceptions
+            self.bucket_created = False
+            try:
+                self.s3.head_bucket(Bucket=prefix)
+            except botocore.exceptions.ClientError as e:
+                error_code = e.response['Error']['Code']
+                if error_code == '404':
+                    self.s3.create_bucket(Bucket=prefix)
+                    self.bucket_created = True
 
             # smart_open always seek to 0 if we don't set this argument.
             # This will lead us to call a Object.get when it is not necessary,
             # so defer seek and call seek before reading objects instead.
-            self.transport_params = {"defer_seek": True, "resource": self.s3}
+            # bmt: change to client model self.transport_params = {"defer_seek": True, "resource": self.s3}
+            self.transport_params = {"defer_seek": True, "client": self.s3}
         self.transport_params.update(self.override_transport_params)
 
     def spill_objects(self, object_refs, owner_addresses) -> List[str]:
@@ -392,7 +407,12 @@ class ExternalStorageSmartOpenImpl(ExternalStorage):
         # Always use the first object ref as a key when fusioning objects.
         first_ref = object_refs[0]
         key = f"{self.prefix}-{first_ref.hex()}-multi-{len(object_refs)}"
-        url = f"{self.uri}/{key}"
+        # bmt: this dosn't work for S3 here
+        # url = f"{self.uri}/{key}"
+        if self.is_for_s3:
+            url = f"s3://{self.prefix}/{key}"
+        else:
+            url = f"{self.uri}/{key}"
         with open(
                 url, "wb",
                 transport_params=self.transport_params) as file_like:
@@ -432,10 +452,20 @@ class ExternalStorageSmartOpenImpl(ExternalStorage):
         return total
 
     def delete_spilled_objects(self, urls: List[str]):
-        pass
+        # bmt: add removal of key's
+        # pass
+        s3 = self.s3
+        for uri in urls:
+            parsed_result = parse_url_with_offset(uri.decode())
+            real_uri = parsed_result.base_url.split('s3://')[1]
+            bucket_key = real_uri.split('/')
+            s3.delete_object(Bucket=bucket_key[0], Key=bucket_key[1])
 
     def destroy_external_storage(self):
-        pass
+        # bmt: add removal of bucket if created
+        # pass
+        if self.bucket_created == True:
+            self.s3.delete_bucket(Bucket=self.prefix)
 
 
 _external_storage = NullStorage()
